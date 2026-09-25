@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "adaptive-concurrency"
-version = "0.1.0"
+version = "0.1.1"
 description = "Latency-aware adaptive concurrency and batch sizing for bulk calls to slow, rate-limited APIs."
 readme = "README.md"
 requires-python = ">=3.10"
