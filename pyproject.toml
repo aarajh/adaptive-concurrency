@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adaptive-concurrency"
+version = "0.1.0"
+description = "Latency-aware adaptive concurrency and batch sizing for bulk calls to slow, rate-limited APIs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Aaraj", email = "aarajh@users.noreply.github.com" }]
+keywords = ["concurrency", "rate-limit", "batching", "aimd", "adaptive", "throttling"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/aarajh/adaptive-concurrency"
+Repository = "https://github.com/aarajh/adaptive-concurrency"
+Issues = "https://github.com/aarajh/adaptive-concurrency/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adaptive_concurrency"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/adaptive_concurrency", "tests", "benchmarks", "docs", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
+
+[tool.mypy]
+strict = true
+# Deliberate: tests and benchmarks stay untyped so mock servers and fixtures stay short.
+files = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C901", "ANN204"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+"{tests,benchmarks}/**" = ["ANN204"]

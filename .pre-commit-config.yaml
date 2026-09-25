@@ -1,0 +1,16 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff-check
+        args: [src, tests, benchmarks]
+        pass_filenames: false
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: mypy
+        language: python
+        additional_dependencies: [mypy==2.0.0]
+        pass_filenames: false
+        types: [python]
