@@ -49,14 +49,15 @@ class AsyncPlateauDoesNotDrift(unittest.IsolatedAsyncioTestCase):
         """Past a flat-topped knee an extra batch in flight buys nothing. Measured as the concurrency
         the server saw, so it covers the async dispatch, not just the controller."""
         per_seed = []
-        for seed in range(4):
+        for seed in range(8):
             server = AsyncMockServer(per_item=0.001, penalty=lambda a: max(1.0, a / KNEE), sigma=0.1, seed=seed)
             r = await arun(list(range(15000)), server, batch_size=10, workers=2, max_workers=16)
             self.assertEqual(r["written"], 15000)
             per_seed.append(mean(c.active for c in server.calls[len(server.calls) // 2:]))
         print(f"\n  async plateau knee={KNEE} cap=16 sigma=0.1: back-half server concurrency "
               f"mean {mean(per_seed):.2f}, per seed {[round(w, 2) for w in per_seed]}")
-        self.assertLessEqual(mean(per_seed), KNEE * 1.4)
+        # Clean runs measure <=5.54 (753 runs, py3.10 and 3.12); worker_probe_min_ratio=1.0 measures >=6.32.
+        self.assertLessEqual(mean(per_seed), KNEE * 1.5)
         self.assertGreaterEqual(mean(per_seed), KNEE * 0.8)
         for w in per_seed:
             self.assertLessEqual(w, KNEE * 2, "no seed may settle at 2x the knee")
