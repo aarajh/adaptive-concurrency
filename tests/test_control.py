@@ -32,7 +32,8 @@ class ControlLog(unittest.TestCase):
 
 class ApplyOverrides(unittest.TestCase):
     def test_force_is_clamped_to_ceiling(self):
-        ctl = Controller(AdaptiveConfig(workers=2, max_workers=4, batch_size=10, max_batch_size=40))
+        ctl = Controller(AdaptiveConfig(workers=2, max_workers=4, batch_size=10, max_batch_size=40,
+                                        min_batch_size=1))
         changes = ctl.apply_overrides({"force_workers": "99", "force_batch_size": "1"})
         self.assertEqual((ctl.setting.workers, ctl.setting.batch_size), (4, 1))
         self.assertEqual(changes, ["force workers 2->4", "force batch_size 10->1"])

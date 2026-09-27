@@ -147,7 +147,7 @@ async def arun_adaptive(
         call = _prepared(process_batch, config, limiter, setting.workers, setting.batch_size, calls.append)
         t0 = time.perf_counter()
         ok, written, err = await call(chunk)
-        return observation(config, setting, calls), ok, written, err, time.perf_counter() - t0
+        return observation(config, setting, calls, err), ok, written, err, time.perf_counter() - t0
 
     def start() -> tuple[list[T], Coroutine[Any, Any, _Attempt]] | None:
         job = run.take()
