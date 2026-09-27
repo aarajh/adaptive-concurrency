@@ -51,9 +51,18 @@ class AdaptiveConfig(PoolConfig):
     min_workers: int = 1
     max_batch_size: int | None = None
     """None means the starting `batch_size`."""
-    min_batch_size: int = 1
+    min_batch_size: int | None = None
+    """Floor the batch-failure path may cut down to. None means max(1, batch_size // 4): a batched
+    API pays for every collapse in request count, so the default bounds a spiral to the floor at
+    4x the original request count rather than the full batch_size-x blowout of a floor of 1."""
     batch_step: int | None = None
     """Additive batch increase; None means max(1, batch_size // 4)."""
+    congestion_classifier: Callable[[float, str], bool] | None = None
+    """Given (elapsed_seconds, error_message) for a failed batch, return True if the failure looks
+    like congestion rather than a size fault -- the caller's call, since only it knows its own
+    server's fast-fail-on-bad-content vs slow-fail-under-load shape. Congestion cuts `workers`,
+    the variable actually causing it, instead of `batch_size`. None preserves the old behaviour:
+    every non-breach failure is a size fault."""
     max_batch_seconds: float | None = None
     """Set to the request timeout. Batch growth stops when the predicted slowest batch would
     exceed batch_seconds_headroom of this."""
@@ -108,9 +117,12 @@ class Observation:
     """First attempt only -- bisection retries are recovery, not a latency sample."""
     ok: bool
     size_fault: bool
-    """First attempt failed and it is attributable to batch size: not a rate-limit breach, and
-    bisection did not isolate a failing single item (a bad item is fixed by bisecting, not by
-    shrinking)."""
+    """First attempt failed and it is attributable to batch size: not a rate-limit breach, not
+    congestion (per `AdaptiveConfig.congestion_classifier`), and bisection did not isolate a
+    failing single item (a bad item is fixed by bisecting, not by shrinking)."""
+    congestion: bool = False
+    """First attempt failed and the caller's `congestion_classifier` attributed it to load rather
+    than batch size. Mutually exclusive with `size_fault`."""
 
 
 @dataclass(frozen=True)
@@ -135,8 +147,12 @@ class Controller:
         down a declining plateau one noisy accept at a time.
       - Unprobed: if latency exceeds congestion_ratio x this setting's own history, cut workers
         multiplicatively. If latency does not fall after the cut, the slowdown is not load-driven
-        (costlier items, a slow server): history -- including the now-stale best -- is discarded
-        and re-learned instead of cutting on down to the floor.
+        (costlier items, a slow server): the cut is undone -- workers goes back to its pre-cut
+        level -- and history, including the now-stale best, is discarded and re-learned instead of
+        cutting on down to the floor.
+      - An explicit batch failure the caller's congestion_classifier attributes to load, rather
+        than to batch_size, cuts workers directly instead of batch_size: the variable actually
+        causing an overload error is the one that should move.
       - Otherwise the window joins history. A probe accepted on one noisy window is re-judged once
         its setting has pooled history: if one fewer worker measures better, step back. Then, if
         latency is within good_ratio of history, one dimension is probed upward, alternating, so a
@@ -162,7 +178,8 @@ class Controller:
             WORKERS: cfg.max_workers if cfg.max_workers is not None else cfg.workers,
             BATCH: cfg.max_batch_size if cfg.max_batch_size is not None else cfg.batch_size,
         }
-        self._min = {WORKERS: cfg.min_workers, BATCH: cfg.min_batch_size}
+        min_batch = cfg.min_batch_size if cfg.min_batch_size is not None else max(1, cfg.batch_size // 4)
+        self._min = {WORKERS: cfg.min_workers, BATCH: max(1, min_batch)}
         self.thread_safe = self._max[WORKERS] > 1
         self._levels = {
             d: max(self._min[d], min(start, self._max[d]))
@@ -175,9 +192,11 @@ class Controller:
         self._probe: _Probe | None = None
         self._ceilings: dict[str, list[int]] = {}
         self._cut_ref: float | None = None
+        self._cut_prev_workers: int | None = None
         self._windows = 0
         self._touched: dict[tuple[int, int], int] = {}
         self._size_cut_epoch = 0
+        self._congestion_cut_epoch = 0
         self._resid: deque[float] = deque(maxlen=200)
         self._next_dim = 0
         self._last_good = dict(self._levels)
@@ -197,8 +216,12 @@ class Controller:
     def observe(self, obs: Observation) -> str | None:
         """Returns a description of any change made, for logging."""
         if not obs.ok:
-            # Batches dispatched before the last size cut are still in flight and will fail at the
-            # old size; they are not evidence against the new one.
+            # Batches dispatched before the last cut are still in flight and will fail at the old
+            # setting; they are not evidence against the new one.
+            if obs.congestion and obs.setting.epoch >= self._congestion_cut_epoch:
+                change = self._decrease(WORKERS, "congestion")
+                self._congestion_cut_epoch = self._epoch
+                return change
             if obs.size_fault and obs.setting.epoch >= self._size_cut_epoch:
                 if self._levels[BATCH] > self._min[BATCH]:
                     change = self._decrease(BATCH, "batch failed", ceiling=self._last_good[BATCH])
@@ -247,11 +270,14 @@ class Controller:
         own = median(self._history[key]) if key in self._history else None
         probe, self._probe = self._probe, None
         cut_ref, self._cut_ref = self._cut_ref, None
+        cut_prev_workers, self._cut_prev_workers = self._cut_prev_workers, None
 
         # Load-driven congestion returns to normal after a cut; exogenous stays near the trigger.
         # The geometric midpoint of the two is the split least sensitive to noise either side.
         if cut_ref is not None and per_item >= math.sqrt(self.cfg.congestion_ratio) * cut_ref:
             self._rebaseline(key, per_item)
+            if cut_prev_workers is not None and cut_prev_workers != self._levels[WORKERS]:
+                self._set(WORKERS, min(cut_prev_workers, self._max[WORKERS]))
             return "rebaseline: latency did not fall after cutting workers, not load-driven"
         if probe is not None:
             best = max((self._throughput(k) for k in self._history if k != key), default=None)
@@ -264,11 +290,13 @@ class Controller:
                 return f"revert {probe.dim} {probed}->{probe.prev_level} (throughput {est / best:.2f}x best)"
         elif own is not None and per_item > self.cfg.congestion_ratio * own:
             ratio = per_item / own
+            prev_workers = self._levels[WORKERS]
             change = self._decrease(WORKERS, f"latency {ratio:.2f}x this setting's history")
             if change is None:
                 self._rebaseline(key, per_item)
                 return f"rebaseline: latency {ratio:.2f}x history at min workers"
             self._cut_ref = own
+            self._cut_prev_workers = prev_workers
             return change
         else:
             self._record(key, per_item)
@@ -431,16 +459,21 @@ def _attempt(process_batch: BatchFn[T], config: AdaptiveConfig, chunk: list[T], 
         call = bisecting(call, config.bisect_min_size)
     t_start = time.perf_counter()
     ok, written, err = call(chunk)
-    return observation(config, setting, calls), ok, written, err, time.perf_counter() - t_start
+    return observation(config, setting, calls, err), ok, written, err, time.perf_counter() - t_start
 
 
-def observation(config: AdaptiveConfig, setting: Setting, calls: list[Call]) -> Observation:
+def observation(config: AdaptiveConfig, setting: Setting, calls: list[Call], err: str = "") -> Observation:
     """`calls` are every request one batch made, first attempt first, bisection retries after."""
     first = calls[0]
     item_fault = config.bisect_on_failure and any(not c.ok and c.n_items <= config.bisect_min_size for c in calls)
+    unattributed = not first.ok and not first.breach and not item_fault
+    congestion = unattributed and config.congestion_classifier is not None and config.congestion_classifier(
+        first.elapsed, err,
+    )
     return Observation(
         setting, first.n_items, first.elapsed, first.ok,
-        size_fault=not first.ok and not first.breach and not item_fault,
+        size_fault=unattributed and not congestion,
+        congestion=congestion,
     )
 
 
